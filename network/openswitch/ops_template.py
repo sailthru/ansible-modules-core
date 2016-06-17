@@ -195,7 +195,7 @@ def main():
         updates = dict()
         for path, key, new_value, old_value in changeset:
             path = '%s.%s' % ('.'.join(path), key)
-            updates[path] = new_value
+            updates[path] = str(new_value)
         result['updates'] = updates
 
         if changeset:
@@ -239,8 +239,7 @@ from ansible.module_utils.urls import *
 from ansible.module_utils.netcfg import *
 from ansible.module_utils.shell import *
 from ansible.module_utils.openswitch import *
+
 if __name__ == '__main__':
-        main()
-
-
+    main()
 

@@ -110,6 +110,7 @@ options:
         - Project name or ID containing the subnet (name admin-only)
      required: false
      default: None
+     version_added: "2.1"
 requirements:
     - "python >= 2.6"
     - "shade"
@@ -169,7 +170,7 @@ def _can_update(subnet, module, cloud):
                                       subnet')
     if ip_version and subnet['ip_version'] != ip_version:
         module.fail_json(msg='Cannot update ip_version in existing subnet')
-    if ipv6_ra_mode and subnet.get('ipv6_ra_mode', None) != ip_version:
+    if ipv6_ra_mode and subnet.get('ipv6_ra_mode', None) != ipv6_ra_mode:
         module.fail_json(msg='Cannot update ipv6_ra_mode in existing subnet')
     if ipv6_a_mode and subnet.get('ipv6_address_mode', None) != ipv6_a_mode:
         module.fail_json(msg='Cannot update ipv6_address_mode in existing \

@@ -123,7 +123,7 @@ state:
             "127.0.0.1",
             "127.0.0.3"
         ],
-        "etag": "W/\"0712e87c-f02f-4bb3-8b9e-2da0390a3886\"",
+        "etag": 'W/"0712e87c-f02f-4bb3-8b9e-2da0390a3886"',
         "id": "/subscriptions/XXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXX/resourceGroups/Testing/providers/Microsoft.Network/virtualNetworks/my_test_network",
         "location": "eastus",
         "name": "my_test_network",
@@ -333,7 +333,7 @@ class AzureRMVirtualNetwork(AzureRMModuleBase):
                         ),
                         tags=results['tags']
                     )
-                    if results['dns_servers']:
+                    if results.get('dns_servers'):
                         vnet.dhcp_options = DhcpOptions(
                             dns_servers=results['dns_servers']
                         )

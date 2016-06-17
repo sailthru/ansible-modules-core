@@ -263,6 +263,7 @@ def package_status(m, pkgname, version, cache, state):
                 provided_packages = cache.get_providing_packages(pkgname)
                 if provided_packages:
                     is_installed = False
+                    upgradable = False
                     # when virtual package providing only one package, look up status of target package
                     if cache.is_virtual_package(pkgname) and len(provided_packages) == 1:
                         package = provided_packages[0]
@@ -380,8 +381,8 @@ def parse_diff(output):
             # check for start marker from apt-get
             diff_start = diff.index('Reading state information...')
         except ValueError:
+            # show everything
             diff_start = -1
-            diff.insert(0, 'Unexpected apt output for --diff. Showing everything:')
     try:
         # check for end marker line from both apt-get and aptitude
         diff_end = (i for i, item in enumerate(diff) if re.match('[0-9]+ (packages )?upgraded', item)).next()
@@ -468,6 +469,14 @@ def install(m, pkgspec, cache, upgrade=False, default_release=None,
     else:
         return (True, dict(changed=False))
 
+def get_field_of_deb(m, deb_file, field="Version"):
+    cmd_dpkg = m.get_bin_path("dpkg", True)
+    cmd = cmd_dpkg + " --field %s %s" % (deb_file, field)
+    rc, stdout, stderr = m.run_command(cmd)
+    if rc != 0:
+        m.fail_json(msg="%s failed" % cmd, stdout=stdout, stderr=stderr)
+    return stdout.strip('\n')
+
 def install_deb(m, debs, cache, force, install_recommends, allow_unauthenticated, dpkg_options):
     changed=False
     deps_to_install = []
@@ -475,10 +484,17 @@ def install_deb(m, debs, cache, force, install_recommends, allow_unauthenticated
     for deb_file in debs.split(','):
         try:
             pkg = apt.debfile.DebPackage(deb_file)
-
-            # Check if it's already installed
-            if pkg.compare_to_version_in_cache() == pkg.VERSION_SAME:
-                continue
+            pkg_name = get_field_of_deb(m, deb_file, "Package")
+            pkg_version = get_field_of_deb(m, deb_file, "Version")
+            try:
+                installed_pkg = apt.Cache()[pkg_name]
+                installed_version = installed_pkg.installed.version
+                if package_version_compare(pkg_version, installed_version) == 0:
+                    # Does not need to down-/upgrade, move on to next package
+                    continue
+            except Exception, e:
+                # Must not be installed, continue with installation
+                pass
             # Check if package is installable
             if not pkg.check() and not force:
                 m.fail_json(msg=pkg._failure_string)
@@ -519,9 +535,10 @@ def install_deb(m, debs, cache, force, install_recommends, allow_unauthenticated
             stdout = out
         if "diff" in retvals:
             diff = retvals["diff"]
-            diff["prepared"] += '\n\n' + out
+            if 'prepared' in diff:
+                diff['prepared'] += '\n\n' + out
         else:
-            diff = out
+            diff = parse_diff(out)
         if "stderr" in retvals:
             stderr = retvals["stderr"] + err
         else:
@@ -658,7 +675,7 @@ def main():
             cache_valid_time = dict(type='int'),
             purge = dict(default=False, type='bool'),
             package = dict(default=None, aliases=['pkg', 'name'], type='list'),
-            deb = dict(default=None),
+            deb = dict(default=None, type='path'),
             default_release = dict(default=None, aliases=['default-release']),
             install_recommends = dict(default=None, aliases=['install-recommends'], type='bool'),
             force = dict(default='no', type='bool'),

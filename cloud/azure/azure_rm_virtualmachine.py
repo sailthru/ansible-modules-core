@@ -289,8 +289,8 @@ powerstate:
     returned: always
     type: string
     sample: running
-state:
-    description: Facts about the current state of the object.
+azure_rm_vm:
+    description: Facts about the current state of the object. Note that facts are not part of the registered output but available directly.
     returned: always
     type: dict
     sample: {
@@ -352,7 +352,7 @@ state:
                             "enableIPForwarding": false,
                             "ipConfigurations": [
                                 {
-                                    "etag": "W/\"041c8c2a-d5dd-4cd7-8465-9125cfbe2cf8\"",
+                                    "etag": 'W/"041c8c2a-d5dd-4cd7-8465-9125cfbe2cf8"',
                                     "id": "/subscriptions/XXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXX/resourceGroups/Testing/providers/Microsoft.Network/networkInterfaces/testvm10_NIC01/ipConfigurations/default",
                                     "name": "default",
                                     "properties": {
@@ -450,7 +450,7 @@ def extract_names_from_blob_uri(blob_uri):
     return extracted_names
 
 
-class AzureRMVirtualMachine(AzureRMModuleBase):   
+class AzureRMVirtualMachine(AzureRMModuleBase):
 
     def __init__(self):
 
@@ -520,7 +520,7 @@ class AzureRMVirtualMachine(AzureRMModuleBase):
             changed=False,
             actions=[],
             powerstate_change=None,
-            state=dict()
+            ansible_facts=dict(azure_rm_vm=None)
         )
 
         super(AzureRMVirtualMachine, self).__init__(derived_arg_spec=self.module_arg_spec,
@@ -666,7 +666,7 @@ class AzureRMVirtualMachine(AzureRMModuleBase):
                 changed = True
 
         self.results['changed'] = changed
-        self.results['state'] = results
+        self.results['ansible_facts']['azure_rm_vm'] = results
         self.results['powerstate_change'] = powerstate_change
 
         if self.check_mode:
@@ -756,7 +756,7 @@ class AzureRMVirtualMachine(AzureRMModuleBase):
 
                     self.log("Create virtual machine with parameters:")
                     self.log(self.serialize_obj(vm_resource, 'VirtualMachine'), pretty_print=True)
-                    self.results['state'] = self.create_or_update_vm(vm_resource)
+                    self.create_or_update_vm(vm_resource)
 
                 elif self.differences and len(self.differences) > 0:
                     # Update the VM based on detected config differences
@@ -826,31 +826,29 @@ class AzureRMVirtualMachine(AzureRMModuleBase):
                                     )
                     self.log("Update virtual machine with parameters:")
                     self.log(self.serialize_obj(vm_resource, 'VirtualMachine'), pretty_print=True)
-                    self.results['state'] = self.create_or_update_vm(vm_resource)
+                    self.create_or_update_vm(vm_resource)
 
                 # Make sure we leave the machine in requested power state
                 if powerstate_change == 'poweron' and self.results['state']['powerstate'] != 'running':
                     # Attempt to power on the machine
                     self.power_on_vm()
-                    self.results['state'] = self.serialize_vm(self.get_vm())
 
                 elif powerstate_change == 'poweroff' and self.results['state']['powerstate'] == 'running':
                     # Attempt to power off the machine
                     self.power_off_vm()
-                    self.results['state'] = self.serialize_vm(self.get_vm())
 
                 elif powerstate_change == 'restarted':
                     self.restart_vm()
-                    self.results['state'] = self.serialize_vm(self.get_vm())
 
                 elif powerstate_change == 'deallocated':
                     self.deallocate_vm()
-                    self.results['state'] = self.serialize_vm(self.get_vm())
+
+                self.results['ansible_facts']['azure_rm_vm'] = self.serialize_vm(self.get_vm())
 
             elif self.state == 'absent':
                 # delete the VM
                 self.log("Delete virtual machine {0}".format(self.name))
-                self.results['state']['status'] = 'Deleted'
+                self.results['ansible_facts']['azure_rm_vm'] = None 
                 self.delete_vm(vm)
 
         # until we sort out how we want to do this globally
@@ -1093,7 +1091,6 @@ class AzureRMVirtualMachine(AzureRMModuleBase):
             self.get_poller_result(poller)
         except Exception as exc:
             self.fail("Error creating or updating virtual machine {0} - {1}".format(self.name, str(exc)))
-        return self.serialize_vm(self.get_vm())
 
     def vm_size_is_valid(self):
         '''

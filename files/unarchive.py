@@ -5,6 +5,7 @@
 # (c) 2013, Dylan Martin <dmartin@seattlecentral.edu>
 # (c) 2015, Toshio Kuratomi <tkuratomi@ansible.com>
 # (c) 2016, Dag Wieers <dag@wieers.com>
+# (c) 2016, Virgil Dupras <hsoft@hardcoded.net>
 #
 # This file is part of Ansible
 #
@@ -113,7 +114,9 @@ import grp
 import datetime
 import time
 import binascii
-from zipfile import ZipFile
+from zipfile import ZipFile, BadZipfile
+import tarfile
+import subprocess
 
 # String from tar that shows the tar contents are different from the
 # filesystem
@@ -162,17 +165,41 @@ class ZipArchive(object):
 #                    mode += 2**(9+j)
         return ( mode & ~umask )
 
+    def _legacy_file_list(self, force_refresh=False):
+        unzip_bin = self.module.get_bin_path('unzip')
+        if not unzip_bin:
+            raise UnarchiveError('Python Zipfile cannot read %s and unzip not found' % self.src)
+
+        rc, out, err = self.module.run_command([unzip_bin, '-v', self.src])
+        if rc:
+            raise UnarchiveError('Neither python zipfile nor unzip can read %s' % self.src)
+
+        for line in out.splitlines()[3:-2]:
+            fields = line.split(None, 7)
+            self._files_in_archive.append(fields[7])
+            self._infodict[fields[7]] = long(fields[6])
+
     def _crc32(self, path):
         if self._infodict:
             return self._infodict[path]
 
-        archive = ZipFile(self.src)
         try:
-            for item in archive.infolist():
-                self._infodict[item.filename] = long(item.CRC)
-        except:
-            archive.close()
-            raise UnarchiveError('Unable to list files in the archive')
+            archive = ZipFile(self.src)
+        except BadZipfile:
+            e = get_exception()
+            if e.args[0].lower().startswith('bad magic number'):
+                # Python2.4 can't handle zipfiles with > 64K files.  Try using
+                # /usr/bin/unzip instead
+                self._legacy_file_list()
+            else:
+                raise
+        else:
+            try:
+                for item in archive.infolist():
+                    self._infodict[item.filename] = long(item.CRC)
+            except:
+                archive.close()
+                raise UnarchiveError('Unable to list files in the archive')
 
         return self._infodict[path]
 
@@ -182,16 +209,26 @@ class ZipArchive(object):
             return self._files_in_archive
 
         self._files_in_archive = []
-        archive = ZipFile(self.src)
         try:
-            for member in archive.namelist():
-                if member not in self.excludes:
-                    self._files_in_archive.append(member)
-        except:
-            archive.close()
-            raise UnarchiveError('Unable to list files in the archive')
+            archive = ZipFile(self.src)
+        except BadZipfile:
+            e = get_exception()
+            if e.args[0].lower().startswith('bad magic number'):
+                # Python2.4 can't handle zipfiles with > 64K files.  Try using
+                # /usr/bin/unzip instead
+                self._legacy_file_list(force_refresh)
+            else:
+                raise
+        else:
+            try:
+                for member in archive.namelist():
+                    if member not in self.excludes:
+                        self._files_in_archive.append(member)
+            except:
+                archive.close()
+                raise UnarchiveError('Unable to list files in the archive')
 
-        archive.close()
+            archive.close()
         return self._files_in_archive
 
     def is_unarchived(self):
@@ -266,13 +303,16 @@ class ZipArchive(object):
         for line in old_out.splitlines():
             change = False
 
-            pcs = line.split()
-            if len(pcs) != 8: continue
+            pcs = line.split(None, 7)
+
+            # Check first and seventh field in order to skip header/footer
+            if len(pcs[0]) != 7 and len(pcs[0]) != 10: continue
+            if len(pcs[6]) != 15: continue
 
             ztype = pcs[0][0]
             permstr = pcs[0][1:10]
-            version = pcs[0][1]
-            ostype = pcs[0][2]
+            version = pcs[1]
+            ostype = pcs[2]
             size = int(pcs[3])
             path = pcs[7]
 
@@ -342,7 +382,7 @@ class ZipArchive(object):
                 diff += 'c%s++++++.?? %s\n' % (ftype, path)
                 continue
 
-            itemized = bytearray('.%s.......??' % ftype)
+            itemized = list('.%s.......??' % ftype)
 
             dt_object = datetime.datetime(*(time.strptime(pcs[6], '%Y%m%d.%H%M%S')[0:6]))
             timestamp = time.mktime(dt_object.timetuple())
@@ -441,7 +481,7 @@ class ZipArchive(object):
             if change:
                 if path not in self.includes:
                     self.includes.append(path)
-                diff += '%s %s\n' % (itemized, path)
+                diff += '%s %s\n' % (''.join(itemized), path)
 
         if self.includes:
             unarchived = False
@@ -490,24 +530,26 @@ class TgzArchive(object):
             # Fallback to tar
             self.cmd_path = self.module.get_bin_path('tar')
         self.zipflag = 'z'
+        self.compress_mode = 'gz'
         self._files_in_archive = []
+
+    def _get_tar_fileobj(self):
+        """Returns a file object that can be read by ``tarfile.open()``."""
+        return open(self.src, 'rb')
 
     @property
     def files_in_archive(self, force_refresh=False):
         if self._files_in_archive and not force_refresh:
             return self._files_in_archive
 
-        cmd = '%s -t%s' % (self.cmd_path, self.zipflag)
-        if self.opts:
-            cmd += ' ' + ' '.join(self.opts)
-        if self.excludes:
-            cmd += ' --exclude="' + '" --exclude="'.join(self.excludes) + '"'
-        cmd += ' -f "%s"' % self.src
-        rc, out, err = self.module.run_command(cmd)
-        if rc != 0:
+        # The use of Python's tarfile module here allows us to easily avoid tricky file encoding
+        # problems. Ref #11348
+        try:
+            tf = tarfile.open(fileobj=self._get_tar_fileobj(), mode='r:%s' % self.compress_mode)
+        except Exception:
             raise UnarchiveError('Unable to list files in the archive')
 
-        for filename in out.splitlines():
+        for filename in tf.getnames():
             if filename and filename not in self.excludes:
                 self._files_in_archive.append(filename)
         return self._files_in_archive
@@ -589,7 +631,10 @@ class TgzArchive(object):
 class TarArchive(TgzArchive):
     def __init__(self, src, dest, file_args, module):
         super(TarArchive, self).__init__(src, dest, file_args, module)
+        # argument to tar
         self.zipflag = ''
+        # parameter for python tarfile library
+        self.compress_mode = ''
 
 
 # class to handle bzip2 compressed tar files
@@ -597,6 +642,7 @@ class TarBzipArchive(TgzArchive):
     def __init__(self, src, dest, file_args, module):
         super(TarBzipArchive, self).__init__(src, dest, file_args, module)
         self.zipflag = 'j'
+        self.compress_mode = 'bz2'
 
 
 # class to handle xz compressed tar files
@@ -604,6 +650,20 @@ class TarXzArchive(TgzArchive):
     def __init__(self, src, dest, file_args, module):
         super(TarXzArchive, self).__init__(src, dest, file_args, module)
         self.zipflag = 'J'
+        self.compress_mode = ''
+
+    def _get_tar_fileobj(self):
+        # Python's tarfile module doesn't support xz compression so we have to manually uncompress
+        # it first.
+        xz_bin_path = self.module.get_bin_path('xz')
+        xz_stdout = tempfile.TemporaryFile()
+        # we don't use self.module.run_command() to avoid loading the whole archive in memory.
+        cmd = subprocess.Popen([xz_bin_path, '-dc', self.src], stdout=xz_stdout)
+        rc = cmd.wait()
+        if rc != 0:
+            raise UnarchiveError("Could not uncompress with xz")
+        xz_stdout.seek(0)
+        return xz_stdout
 
 
 # try handlers in order and return the one that works or bail if none work
@@ -627,12 +687,15 @@ def main():
             creates           = dict(required=False, type='path'),
             list_files        = dict(required=False, default=False, type='bool'),
             keep_newer        = dict(required=False, default=False, type='bool'),
-            exclude           = dict(requited=False, default=[], type='list'),
+            exclude           = dict(required=False, default=[], type='list'),
             extra_opts        = dict(required=False, default=[], type='list'),
         ),
         add_file_common_args = True,
 #        supports_check_mode = True,
     )
+
+    # We screenscrape a huge amount of commands so use C locale anytime we do
+    module.run_command_environ_update = dict(LANG='C', LC_ALL='C', LC_MESSAGES='C', LC_CTYPE='C')
 
     src    = os.path.expanduser(module.params['src'])
     dest   = os.path.expanduser(module.params['dest'])
@@ -699,7 +762,7 @@ def main():
             if res_args['extract_results']['rc'] != 0:
                 module.fail_json(msg="failed to unpack %s to %s" % (src, dest), **res_args)
         except IOError:
-            module.fail_json(msg="failed to unpack %s to %s" % (src, dest))
+            module.fail_json(msg="failed to unpack %s to %s" % (src, dest), **res_args)
         else:
             res_args['changed'] = True
 
@@ -714,7 +777,7 @@ def main():
             try:
                 res_args['changed'] = module.set_fs_attributes_if_different(file_args, res_args['changed'])
             except (IOError, OSError), e:
-                module.fail_json(msg="Unexpected error when accessing exploded file: %s" % str(e))
+                module.fail_json(msg="Unexpected error when accessing exploded file: %s" % str(e), **res_args)
 
     if module.params['list_files']:
         res_args['files'] = handler.files_in_archive
