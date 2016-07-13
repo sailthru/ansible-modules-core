@@ -51,18 +51,18 @@ options:
     aliases: []
   cert_chain:
     description:
-      - The path to the CA certificate chain in PEM encoded format.
+      - Certificate trust chain in PEM format. If a path matching the given value is supplied, the certificates are loaded from the file, else it is assumed to be specified directly.
     required: false
     default: null
     aliases: []
   cert:
     description:
-      - The path to the certificate body in PEM encoded format.
+      - Certificate body in PEM format. If a path matching the given value is supplied, the certificate is loaded from the file, else it is assumed to be specified directly.
     required: false
     aliases: []
   key:
     description:
-      - The path to the private key of the certificate in PEM encoded format.
+      - Certificate key in PEM format. If a path matching the given value is supplied, the certificate is loaded from the file, else it is assumed to be specified directly.
   dup_ok:
     description:
       - By default the module will not upload a certificate that is already uploaded into AWS. If set to True, it will upload the certificate as long as the name is unique.
@@ -143,7 +143,11 @@ def cert_meta(iam, name):
                                                  server_certificate.\
                                                  server_certificate_metadata.\
                                                  expiration
-    return opath, ocert, ocert_id, upload_date, exp
+    arn         = iam.get_server_certificate(name).get_server_certificate_result.\
+                                                 server_certificate.\
+                                                 server_certificate_metadata.\
+                                                 arn
+    return opath, ocert, ocert_id, upload_date, exp, arn
 
 def dup_check(module, iam, name, new_name, cert, orig_cert_names, orig_cert_bodies, dup_ok):
     update=False
@@ -159,6 +163,9 @@ def dup_check(module, iam, name, new_name, cert, orig_cert_names, orig_cert_bodi
                     continue
                 else:
                     if orig_cert_bodies[c_index] == cert:
+                        update=True
+                        break
+                    elif cert.startswith(orig_cert_bodies[c_index]):
                         update=True
                         break
                     elif orig_cert_bodies[c_index] != cert:
@@ -183,34 +190,34 @@ def cert_action(module, iam, name, cpath, new_name, new_path, state,
         update = dup_check(module, iam, name, new_name, cert, orig_cert_names,
                            orig_cert_bodies, dup_ok)
         if update:
-            opath, ocert, ocert_id, upload_date, exp = cert_meta(iam, name)
+            opath, ocert, ocert_id, upload_date, exp, arn = cert_meta(iam, name)
             changed=True
             if new_name and new_path:
                 iam.update_server_cert(name, new_cert_name=new_name, new_path=new_path)
                 module.exit_json(changed=changed, original_name=name, new_name=new_name,
                                  original_path=opath, new_path=new_path, cert_body=ocert,
-                                 upload_date=upload_date, expiration_date=exp)
+                                 upload_date=upload_date, expiration_date=exp, arn=arn)
             elif new_name and not new_path:
                 iam.update_server_cert(name, new_cert_name=new_name)
                 module.exit_json(changed=changed, original_name=name, new_name=new_name,
                                  cert_path=opath, cert_body=ocert,
-                                 upload_date=upload_date, expiration_date=exp)
+                                 upload_date=upload_date, expiration_date=exp, arn=arn)
             elif not new_name and new_path:
                 iam.update_server_cert(name, new_path=new_path)
                 module.exit_json(changed=changed, name=new_name,
                                  original_path=opath, new_path=new_path, cert_body=ocert,
-                                 upload_date=upload_date, expiration_date=exp)
+                                 upload_date=upload_date, expiration_date=exp, arn=arn)
             else:
                 changed=False
                 module.exit_json(changed=changed, name=name, cert_path=opath, cert_body=ocert,
-                                 upload_date=upload_date, expiration_date=exp,
+                                 upload_date=upload_date, expiration_date=exp, arn=arn,
                                  msg='No new path or name specified. No changes made')
         else:
             changed=True
             iam.upload_server_cert(name, cert, key, cert_chain=chain, path=cpath)
-            opath, ocert, ocert_id, upload_date, exp = cert_meta(iam, name)
+            opath, ocert, ocert_id, upload_date, exp, arn = cert_meta(iam, name)
             module.exit_json(changed=changed, name=name, cert_path=opath, cert_body=ocert,
-                                 upload_date=upload_date, expiration_date=exp)
+                                 upload_date=upload_date, expiration_date=exp, arn=arn)
     elif state == 'absent':
         if name in orig_cert_names:
             changed=True
@@ -262,10 +269,21 @@ def main():
     cert_chain = module.params.get('cert_chain')
     dup_ok = module.params.get('dup_ok')
     if state == 'present':
-        cert = open(module.params.get('cert'), 'r').read().rstrip()
-        key = open(module.params.get('key'), 'r').read().rstrip()
+        try:
+            cert = open(module.params.get('cert'), 'r').read().rstrip()
+        except IOError:
+            cert = unicode(module.params.get('cert').rstrip())
+
+        try:
+            key = open(module.params.get('key'), 'r').read().rstrip()
+        except IOError:
+            key = unicode(module.params.get('key').rstrip())
+
         if cert_chain is not None:
-            cert_chain = open(module.params.get('cert_chain'), 'r').read()
+            try:
+                cert_chain = open(module.params.get('cert_chain'), 'r').read()
+            except IOError:
+                cert_chain = unicode(module.params.get('cert_chain').rstrip())
     else:
         key=cert=chain=None
 
